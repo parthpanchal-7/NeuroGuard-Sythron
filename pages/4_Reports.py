@@ -4,6 +4,7 @@ import cv2
 import streamlit as st
 import pandas as pd
 from utils.detector import NeuroGuardEngine
+from features.reports import build_report_frame, build_threat_counts
 
 st.set_page_config(page_title="NeuroGuard Reports", page_icon="📈", layout="wide")
 
@@ -51,22 +52,10 @@ cols[3].markdown(
 )
 
 if engine.event_log:
-    df = pd.DataFrame([
-        {
-            "timestamp": e["timestamp"],
-            "threat_level": e["threat_level"],
-            "delta_mean": e["delta_mean"],
-            "inference_ms": e["inference_time_ms"],
-            "objects": ", ".join([d["label"] for d in e["detected_objects"]]),
-        }
-        for e in engine.event_log
-    ])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    if not df["timestamp"].isna().all():
-        df = df.sort_values("timestamp")
+    df = build_report_frame(engine.event_log)
 
     st.markdown('<div class="panel"><h3>Threat Distribution</h3></div>', unsafe_allow_html=True)
-    threat_counts = df["threat_level"].value_counts().reindex(["HIGH", "MEDIUM", "LOW"], fill_value=0)
+    threat_counts = pd.Series(build_threat_counts(engine.event_log)).reindex(["HIGH", "MEDIUM", "LOW"], fill_value=0)
     st.bar_chart(threat_counts)
 
     st.markdown('<div class="panel"><h3>Inference Trend</h3></div>', unsafe_allow_html=True)

@@ -4,6 +4,9 @@ import cv2
 import pandas as pd
 import streamlit as st
 from utils.detector import NeuroGuardEngine, STATE_COLORS
+from features.alerts import alert_rows, latest_snapshot_path
+from features.reports import build_threat_counts
+from features.system import render_audio_controls, render_resource_cards
 
 st.set_page_config(
     page_title="NeuroGuard",
@@ -75,6 +78,7 @@ if "engine" not in st.session_state:
     st.session_state.delta_threshold = 25
     st.session_state.cooldown_duration = 10
     st.session_state.min_contour_area = 500
+    st.session_state.audio_alerts_enabled = False
     st.session_state.page = "Dashboard"
 
 engine = st.session_state.engine
@@ -88,6 +92,7 @@ if st.sidebar.button("Restart System", use_container_width=True):
             "cooldown_duration": st.session_state.cooldown_duration,
             "min_contour_area": st.session_state.min_contour_area,
             "confidence": 0.35,
+            "audio_alerts_enabled": st.session_state.audio_alerts_enabled,
         }
     )
     engine = st.session_state.engine
@@ -127,10 +132,12 @@ with st.sidebar.expander("System Tuning", expanded=True):
         value=st.session_state.min_contour_area,
         help="Minimum motion region size used by fallback detection.",
     )
+    st.session_state.audio_alerts_enabled = render_audio_controls(engine)
 
 engine.delta_threshold = st.session_state.delta_threshold
 engine.cooldown_duration = st.session_state.cooldown_duration
 engine.min_contour_area = st.session_state.min_contour_area
+engine.audio_alerts_enabled = st.session_state.audio_alerts_enabled
 
 st.sidebar.divider()
 
@@ -194,6 +201,8 @@ if page == "Dashboard":
         unsafe_allow_html=True,
     )
 
+    render_resource_cards("System Resources")
+
     row1, row2 = st.columns([2, 1])
     with row1:
         st.markdown('<div class="panel"><h3>📹 Current Camera Preview</h3></div>', unsafe_allow_html=True)
@@ -220,16 +229,7 @@ if page == "Dashboard":
     st.markdown('<div class="panel"><h3>📝 Recent Detection Events</h3></div>', unsafe_allow_html=True)
     events = engine.recent_events(limit=8)
     if events:
-        rows = []
-        for event in events:
-            rows.append(
-                {
-                    "timestamp": event["timestamp"],
-                    "threat_level": event["threat_level"],
-                    "objects": ", ".join([f"{d['label']}({d['confidence']:.2f})" for d in event["detected_objects"]]),
-                    "snapshot": os.path.basename(event["snapshot_path"]) if event["snapshot_path"] else "-",
-                }
-            )
+        rows = alert_rows(events, limit=8)
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
         st.info("No detection events have been logged yet.")
@@ -273,17 +273,8 @@ elif page == "Alerts":
     st.markdown('<div class="main-title">Alerts</div>', unsafe_allow_html=True)
     st.caption("View all recorded events and snapshots.")
     if engine.event_log:
-        alert_rows = []
-        for event in engine.event_log:
-            alert_rows.append(
-                {
-                    "Time": event["timestamp"],
-                    "Threat": event["threat_level"],
-                    "Objects": ", ".join([d["label"] for d in event["detected_objects"]]),
-                    "Snapshot": os.path.basename(event["snapshot_path"]) if event["snapshot_path"] else "-",
-                }
-            )
-        st.dataframe(pd.DataFrame(alert_rows), use_container_width=True)
+        rows = alert_rows(engine.event_log, limit=len(engine.event_log))
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
         st.info("No alerts have been generated yet.")
 
@@ -294,7 +285,7 @@ elif page == "Alerts":
 elif page == "Reports":
     st.markdown('<div class="main-title">Reports</div>', unsafe_allow_html=True)
     st.caption("Analyze motion detection, inference volume, and threat trends.")
-    counts = engine.threat_counts()
+    counts = build_threat_counts(engine.event_log)
     st.markdown('<div class="panel"><h3>Threat Distribution</h3></div>', unsafe_allow_html=True)
     st.bar_chart(pd.DataFrame({'count': list(counts.values())}, index=list(counts.keys())))
 
@@ -305,6 +296,8 @@ elif page == "Reports":
             "Inference Frames": [engine.inference_frames],
         }
     )
+
+    render_resource_cards("Resource Snapshot")
 
     if st.button("Export event log to CSV"):
         export_path = engine.export_events()

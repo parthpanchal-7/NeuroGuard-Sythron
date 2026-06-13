@@ -4,6 +4,8 @@ import cv2
 import streamlit as st
 import pandas as pd
 from utils.detector import NeuroGuardEngine
+from features.alerts import alert_rows
+from features.system import render_audio_controls, render_resource_cards
 
 st.set_page_config(page_title="NeuroGuard Live Monitoring", page_icon="📹", layout="wide")
 
@@ -29,6 +31,9 @@ if "monitoring" not in st.session_state:
     st.session_state.monitoring = False
     st.session_state.last_action = "Ready"
 
+if "audio_alerts_enabled" not in st.session_state:
+    st.session_state.audio_alerts_enabled = False
+
 engine = st.session_state.engine
 
 with st.sidebar:
@@ -47,6 +52,7 @@ with st.sidebar:
     if st.button("Capture one cycle"):
         st.session_state.last_action = "Manual capture triggered"
         engine.step()
+    st.session_state.audio_alerts_enabled = render_audio_controls(engine)
     st.markdown("---")
     st.markdown("### System status")
     st.write(f"**State:** {engine.system_state}")
@@ -92,16 +98,7 @@ with left:
 
     st.markdown('<div class="panel"><h3>Recent Detection Events</h3></div>', unsafe_allow_html=True)
     if engine.event_log:
-        rows = []
-        for event in engine.event_log[:8]:
-            rows.append(
-                {
-                    "Time": event["timestamp"],
-                    "Threat": event["threat_level"],
-                    "Objects": ", ".join([f"{d['label']}({d['confidence']:.2f})" for d in event["detected_objects"]]),
-                    "Snapshot": os.path.basename(event["snapshot_path"]) if event["snapshot_path"] else "-",
-                }
-            )
+        rows = alert_rows(engine.event_log, limit=8)
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
         st.info("No detection events have been logged yet.")
@@ -125,6 +122,7 @@ with right:
         f'<div class="metric-card"><div class="metric-title">Computation reduction</div><div class="metric-value">{summary["reduction_pct"]}%</div></div>',
         unsafe_allow_html=True,
     )
+    render_resource_cards("Resource Snapshot")
     st.markdown('<div class="panel"><h3>Last Snapshot</h3></div>', unsafe_allow_html=True)
     if summary["last_snapshot_path"]:
         st.image(summary["last_snapshot_path"], use_container_width=True)

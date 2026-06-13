@@ -23,6 +23,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 MODEL_PATH = os.path.join(ROOT_DIR, "models", "yolov8n.pt")
 SNAPSHOT_DIR = os.path.join(ROOT_DIR, "snapshots")
 EXPORT_DIR = os.path.join(ROOT_DIR, "exports")
+MODEL_FALLBACK = "yolov8n.pt"
 
 CLASS_THREAT = {
     "person": "MEDIUM",
@@ -54,8 +55,15 @@ STATE_COLORS = {
 
 
 def ensure_directories():
+    os.makedirs(os.path.join(ROOT_DIR, "models"), exist_ok=True)
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     os.makedirs(EXPORT_DIR, exist_ok=True)
+
+
+def resolve_model_source():
+    if os.path.exists(MODEL_PATH):
+        return MODEL_PATH, "Loaded local YOLOv8n weights"
+    return MODEL_FALLBACK, "Using bundled YOLOv8n download"
 
 
 class NeuroGuardEngine:
@@ -65,12 +73,15 @@ class NeuroGuardEngine:
         self.cooldown_duration = config.get("cooldown_duration", 10)
         self.min_contour_area = config.get("min_contour_area", 500)
         self.confidence = config.get("confidence", 0.35)
+        self.power_save_after_frames = int(config.get("power_save_after_frames", 5))
         self.camera = CameraSource()
         self.model = None
         self.prev_frame = None
         self.system_state = "INITIALIZING"
         self.total_frames = 0
         self.inference_frames = 0
+        self.idle_frames = 0
+        self.power_saving_mode = False
         self.event_log = []
         self.cooldown_until = 0.0
         self.last_delta = 0.0
@@ -80,6 +91,9 @@ class NeuroGuardEngine:
         self.last_threat = "LOW"
         self.last_inference_ms = 0.0
         self.model_status = "Not loaded"
+        self.audio_alerts_enabled = bool(config.get("audio_alerts_enabled", False))
+        self.audio_alert_cooldown = float(config.get("audio_alert_cooldown", 4.0))
+        self.last_audio_alert_ts = 0.0
         ensure_directories()
         self._setup_model()
 
@@ -88,17 +102,35 @@ class NeuroGuardEngine:
             self.model_status = "Ultralytics unavailable"
             return
 
-        if not os.path.exists(MODEL_PATH):
-            self.model_status = "Model missing"
-            return
-
         try:
-            self.model = YOLO(MODEL_PATH)
-            self.model_status = "Loaded"
+            model_source, model_status = resolve_model_source()
+            self.model = YOLO(model_source)
+            self.model_status = model_status
         except Exception as exc:
             self.model = None
             self.model_status = f"Load error"
             self.last_error = str(exc)
+
+    def _play_audio_alert(self, threat_level):
+        if not self.audio_alerts_enabled:
+            return
+        if threat_level not in {"MEDIUM", "HIGH"}:
+            return
+
+        now = time.time()
+        if now - self.last_audio_alert_ts < self.audio_alert_cooldown:
+            return
+
+        try:
+            import winsound
+
+            frequency = 1200 if threat_level == "HIGH" else 900
+            duration = 250 if threat_level == "HIGH" else 160
+            winsound.Beep(frequency, duration)
+        except Exception:
+            print("\a", end="", flush=True)
+
+        self.last_audio_alert_ts = now
 
     @property
     def reduction_pct(self):
@@ -110,12 +142,22 @@ class NeuroGuardEngine:
     def active_cooldown(self):
         return time.time() < self.cooldown_until
 
+    @property
+    def low_compute_mode(self):
+        return self.power_saving_mode or self.system_state == "POWER_SAVING"
+
     def open_camera(self):
         return self.camera.open()
 
-    def prepare_frame(self, frame):
+    def prepare_frame(self, frame, low_power=False):
+        if low_power:
+            frame = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return cv2.GaussianBlur(gray, (21, 21), 0)
+
+    def to_power_saving_preview(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     def annotate_frame(self, frame, detections=None, state_text=None):
         annotated = frame.copy()
@@ -274,6 +316,7 @@ class NeuroGuardEngine:
         if detections:
             snapshot_path = self._save_snapshot(annotated, self.last_threat)
             self._create_event(detections, snapshot_path, self.last_delta, self.last_inference_ms)
+            self._play_audio_alert(self.last_threat)
 
         self.cooldown_until = time.time() + self.cooldown_duration
         self.system_state = "COOLDOWN"
@@ -293,11 +336,13 @@ class NeuroGuardEngine:
             return None
 
         self.total_frames += 1
-        blurred = self.prepare_frame(frame)
+        blurred = self.prepare_frame(frame, low_power=self.low_compute_mode)
         if self.prev_frame is None:
             self.prev_frame = blurred
             self.last_image = self.annotate_frame(frame, state_text="IDLE")
             self.system_state = "IDLE"
+            self.idle_frames = 0
+            self.power_saving_mode = False
             return self.last_image
 
         delta_frame = cv2.absdiff(self.prev_frame, blurred)
@@ -306,11 +351,15 @@ class NeuroGuardEngine:
         if self.active_cooldown:
             self.prev_frame = blurred
             self.system_state = "COOLDOWN"
+            self.idle_frames = 0
+            self.power_saving_mode = False
             self.last_image = self.annotate_frame(frame, state_text="COOLDOWN")
             return self.last_image
 
         if self.last_delta >= self.delta_threshold:
             self.system_state = "MOTION_DETECTED"
+            self.idle_frames = 0
+            self.power_saving_mode = False
             self.last_image = self.annotate_frame(frame, state_text="MOTION_DETECTED")
             self.last_image = self.run_inference(frame, delta_frame)
             self.prev_frame = blurred
@@ -318,8 +367,15 @@ class NeuroGuardEngine:
 
         self.prev_frame = blurred
 
-        self.system_state = "IDLE"
-        self.last_image = self.annotate_frame(frame, state_text="IDLE")
+        self.idle_frames += 1
+        if self.idle_frames >= self.power_save_after_frames:
+            self.power_saving_mode = True
+            self.system_state = "POWER_SAVING"
+            preview = self.to_power_saving_preview(frame)
+            self.last_image = self.annotate_frame(preview, state_text="POWER_SAVING")
+        else:
+            self.system_state = "IDLE"
+            self.last_image = self.annotate_frame(frame, state_text="IDLE")
         return self.last_image
 
     def release_camera(self):
@@ -339,6 +395,8 @@ class NeuroGuardEngine:
             "model_status": self.model_status,
             "last_snapshot_path": self.last_snapshot_path,
             "last_error": self.last_error,
+            "power_saving_mode": self.power_saving_mode,
+            "idle_frames": self.idle_frames,
         }
 
     def export_events(self):

@@ -3,6 +3,7 @@ import cv2
 import streamlit as st
 import pandas as pd
 from utils.detector import NeuroGuardEngine
+from features.alerts import alert_rows, alert_summary, latest_snapshot_path
 
 st.set_page_config(page_title="NeuroGuard Alerts", page_icon="🚨", layout="wide")
 
@@ -34,20 +35,17 @@ st.markdown("Review all captured events, snapshots, and threat classifications."
 alerts = engine.event_log
 
 if alerts:
-    total = len(alerts)
-    high = sum(1 for e in alerts if e["threat_level"] == "HIGH")
-    medium = sum(1 for e in alerts if e["threat_level"] == "MEDIUM")
-    low = sum(1 for e in alerts if e["threat_level"] == "LOW")
+    summary = alert_summary(alerts)
 
     st.markdown(
         '<div class="panel"><h3>Alert Summary</h3></div>',
         unsafe_allow_html=True,
     )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Alerts", total)
-    c2.metric("High", high)
-    c3.metric("Medium", medium)
-    c4.metric("Low", low)
+    c1.metric("Total Alerts", summary["total"])
+    c2.metric("High", summary["high"])
+    c3.metric("Medium", summary["medium"])
+    c4.metric("Low", summary["low"])
 
     if st.button("Export alerts to CSV"):
         export_path = engine.export_events()
@@ -63,20 +61,10 @@ if alerts:
             st.error("Unable to export alerts. Check logs.")
 
     st.markdown('<div class="panel"><h3>Recent Alerts</h3></div>', unsafe_allow_html=True)
-    rows = []
-    for event in alerts[:12]:
-        rows.append(
-            {
-                "Time": event["timestamp"],
-                "Threat": event["threat_level"],
-                "Objects": ", ".join([f"{d['label']}({d['confidence']:.2f})" for d in event["detected_objects"]]),
-                "Delta": f"{event['delta_mean']:.1f}",
-                "Inference (ms)": f"{event['inference_time_ms']:.1f}",
-            }
-        )
+    rows = alert_rows(alerts, limit=12)
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    latest_snapshot = alerts[0].get("snapshot_path")
+    latest_snapshot = latest_snapshot_path(alerts)
     if latest_snapshot and os.path.exists(latest_snapshot):
         st.markdown('<div class="panel"><h3>Latest Snapshot</h3></div>', unsafe_allow_html=True)
         st.image(latest_snapshot, use_container_width=True)
