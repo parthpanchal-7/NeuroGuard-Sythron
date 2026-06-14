@@ -1,5 +1,6 @@
 import os
 import time
+# pyrefly: ignore [missing-import]
 import cv2
 import pandas as pd
 import streamlit as st
