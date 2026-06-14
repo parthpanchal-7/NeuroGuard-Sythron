@@ -180,59 +180,87 @@ if page == "Dashboard":
 
     summary = engine.summary()
     cols = st.columns(4)
-    cols[0].markdown(
-        f"<div class='metric-card'><div class='metric-title'>Total Frames</div>"
-        f"<div class='metric-value'>{summary['total_frames']}</div></div>",
-        unsafe_allow_html=True,
-    )
-    cols[1].markdown(
-        f"<div class='metric-card'><div class='metric-title'>Inference Frames</div>"
-        f"<div class='metric-value'>{summary['inference_frames']}</div></div>",
-        unsafe_allow_html=True,
-    )
-    cols[2].markdown(
-        f"<div class='metric-card'><div class='metric-title'>Reduction</div>"
-        f"<div class='metric-value'>{summary['reduction_pct']}%</div></div>",
-        unsafe_allow_html=True,
-    )
-    cols[3].markdown(
-        f"<div class='metric-card'><div class='metric-title'>Logged Events</div>"
-        f"<div class='metric-value'>{summary['event_count']}</div></div>",
-        unsafe_allow_html=True,
-    )
+    m1 = cols[0].empty()
+    m2 = cols[1].empty()
+    m3 = cols[2].empty()
+    m4 = cols[3].empty()
 
-    render_resource_cards("System Resources")
+    resources_placeholder = st.empty()
 
     row1, row2 = st.columns([2, 1])
     with row1:
         st.markdown('<div class="panel"><h3>📹 Current Camera Preview</h3></div>', unsafe_allow_html=True)
-        if st.session_state.monitoring:
-            latest_frame = engine.step()
-        else:
-            latest_frame = engine.last_image
-
-        if latest_frame is not None:
-            image_display = cv2.cvtColor(latest_frame, cv2.COLOR_BGR2RGB)
-            st.image(image_display, use_container_width=True)
-        else:
-            st.warning("Camera not available or no frame yet. Start monitoring to initialize.")
+        image_placeholder = st.empty()
 
     with row2:
         st.markdown('<div class="panel"><h3>📌 Quick Metrics</h3></div>', unsafe_allow_html=True)
-        st.markdown(f"**Threat Level:** {summary['last_threat']}  ")
-        st.markdown(f"**Last inference:** {summary['last_inference_ms']} ms  ")
-        st.markdown(f"**Model:** {summary['model_status']}  ")
-        if summary['last_snapshot_path']:
-            st.markdown(f"**Last Snapshot:** {os.path.basename(summary['last_snapshot_path'])}")
-            st.image(summary['last_snapshot_path'], use_container_width=True)
+        quick_metrics_placeholder = st.empty()
+        quick_image_placeholder = st.empty()
 
     st.markdown('<div class="panel"><h3>📝 Recent Detection Events</h3></div>', unsafe_allow_html=True)
-    events = engine.recent_events(limit=8)
-    if events:
-        rows = alert_rows(events, limit=8)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    events_placeholder = st.empty()
+
+    if not st.session_state.monitoring:
+        m1.markdown(f"<div class='metric-card'><div class='metric-title'>Total Frames</div><div class='metric-value'>{summary['total_frames']}</div></div>", unsafe_allow_html=True)
+        m2.markdown(f"<div class='metric-card'><div class='metric-title'>Inference Frames</div><div class='metric-value'>{summary['inference_frames']}</div></div>", unsafe_allow_html=True)
+        m3.markdown(f"<div class='metric-card'><div class='metric-title'>Reduction</div><div class='metric-value'>{summary['reduction_pct']}%</div></div>", unsafe_allow_html=True)
+        m4.markdown(f"<div class='metric-card'><div class='metric-title'>Logged Events</div><div class='metric-value'>{summary['event_count']}</div></div>", unsafe_allow_html=True)
+        with resources_placeholder:
+            render_resource_cards("System Resources")
+        if engine.last_image is not None:
+            image_placeholder.image(cv2.cvtColor(engine.last_image, cv2.COLOR_BGR2RGB), use_container_width=True)
+        else:
+            image_placeholder.warning("Camera not available or no frame yet. Start monitoring to initialize.")
+        with quick_metrics_placeholder:
+            st.markdown(f"**Threat Level:** {summary['last_threat']}  ")
+            st.markdown(f"**Last inference:** {summary['last_inference_ms']} ms  ")
+            st.markdown(f"**Model:** {summary['model_status']}  ")
+            if summary['last_snapshot_path']:
+                st.markdown(f"**Last Snapshot:** {os.path.basename(summary['last_snapshot_path'])}")
+        if summary['last_snapshot_path']:
+            quick_image_placeholder.image(summary['last_snapshot_path'], use_container_width=True)
+        events = engine.recent_events(limit=8)
+        if events:
+            rows = alert_rows(events, limit=8)
+            events_placeholder.dataframe(pd.DataFrame(rows), use_container_width=True)
+        else:
+            events_placeholder.info("No detection events have been logged yet.")
     else:
-        st.info("No detection events have been logged yet.")
+        while st.session_state.monitoring:
+            latest_frame = engine.step()
+            summary = engine.summary()
+            
+            m1.markdown(f"<div class='metric-card'><div class='metric-title'>Total Frames</div><div class='metric-value'>{summary['total_frames']}</div></div>", unsafe_allow_html=True)
+            m2.markdown(f"<div class='metric-card'><div class='metric-title'>Inference Frames</div><div class='metric-value'>{summary['inference_frames']}</div></div>", unsafe_allow_html=True)
+            m3.markdown(f"<div class='metric-card'><div class='metric-title'>Reduction</div><div class='metric-value'>{summary['reduction_pct']}%</div></div>", unsafe_allow_html=True)
+            m4.markdown(f"<div class='metric-card'><div class='metric-title'>Logged Events</div><div class='metric-value'>{summary['event_count']}</div></div>", unsafe_allow_html=True)
+            
+            with resources_placeholder:
+                render_resource_cards("System Resources")
+                
+            if latest_frame is not None:
+                image_placeholder.image(cv2.cvtColor(latest_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
+            else:
+                image_placeholder.warning("Camera not available or no frame yet.")
+                
+            with quick_metrics_placeholder:
+                st.markdown(f"**Threat Level:** {summary['last_threat']}  ")
+                st.markdown(f"**Last inference:** {summary['last_inference_ms']} ms  ")
+                st.markdown(f"**Model:** {summary['model_status']}  ")
+                if summary['last_snapshot_path']:
+                    st.markdown(f"**Last Snapshot:** {os.path.basename(summary['last_snapshot_path'])}")
+            
+            if summary['last_snapshot_path']:
+                quick_image_placeholder.image(summary['last_snapshot_path'], use_container_width=True)
+                
+            events = engine.recent_events(limit=8)
+            if events:
+                rows = alert_rows(events, limit=8)
+                events_placeholder.dataframe(pd.DataFrame(rows), use_container_width=True)
+            else:
+                events_placeholder.info("No detection events have been logged yet.")
+                
+            time.sleep(0.03)
 
 elif page == "Live Monitoring":
     st.markdown('<div class="main-title">Live Monitoring</div>', unsafe_allow_html=True)

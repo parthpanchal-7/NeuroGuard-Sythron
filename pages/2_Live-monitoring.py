@@ -84,47 +84,74 @@ left, right = st.columns([2, 1])
 
 with left:
     st.markdown('<div class="panel"><h3>Live Feed</h3></div>', unsafe_allow_html=True)
-    if st.session_state.monitoring:
-        frame = engine.step()
-        if frame is not None:
-            st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), use_container_width=True)
-        else:
-            st.warning("No camera frame available. Check your webcam connection.")
-    else:
-        if engine.last_image is not None:
-            st.image(cv2.cvtColor(engine.last_image, cv2.COLOR_BGR2RGB), use_container_width=True)
-        else:
-            st.info("Monitoring is paused. Use the sidebar to start monitoring or capture one cycle.")
-
+    image_placeholder = st.empty()
     st.markdown('<div class="panel"><h3>Recent Detection Events</h3></div>', unsafe_allow_html=True)
-    if engine.event_log:
-        rows = alert_rows(engine.event_log, limit=8)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    else:
-        st.info("No detection events have been logged yet.")
+    events_placeholder = st.empty()
 
 with right:
     st.markdown('<div class="panel"><h3>Live Metrics</h3></div>', unsafe_allow_html=True)
-    summary = engine.summary()
-    st.markdown(
-        f'<div class="metric-card"><div class="metric-title">System State</div><div class="metric-value">{summary["state"]}</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="metric-card"><div class="metric-title">Cooldown remaining</div><div class="metric-value">{max(0, int(engine.cooldown_until - time.time()))}s</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="metric-card"><div class="metric-title">Inference frames</div><div class="metric-value">{summary["inference_frames"]}</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="metric-card"><div class="metric-title">Computation reduction</div><div class="metric-value">{summary["reduction_pct"]}%</div></div>',
-        unsafe_allow_html=True,
-    )
-    render_resource_cards("Resource Snapshot")
+    m_state = st.empty()
+    m_cooldown = st.empty()
+    m_inf = st.empty()
+    m_red = st.empty()
+    resources_placeholder = st.empty()
     st.markdown('<div class="panel"><h3>Last Snapshot</h3></div>', unsafe_allow_html=True)
-    if summary["last_snapshot_path"]:
-        st.image(summary["last_snapshot_path"], use_container_width=True)
+    snapshot_placeholder = st.empty()
+
+if not st.session_state.monitoring:
+    summary = engine.summary()
+    if engine.last_image is not None:
+        image_placeholder.image(cv2.cvtColor(engine.last_image, cv2.COLOR_BGR2RGB), use_container_width=True)
     else:
-        st.write("Waiting for the first detected event...")
+        image_placeholder.info("Monitoring is paused. Use the sidebar to start monitoring or capture one cycle.")
+    
+    events = engine.recent_events(limit=8)
+    if events:
+        rows = alert_rows(events, limit=8)
+        events_placeholder.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        events_placeholder.info("No detection events have been logged yet.")
+
+    m_state.markdown(f'<div class="metric-card"><div class="metric-title">System State</div><div class="metric-value">{summary["state"]}</div></div>', unsafe_allow_html=True)
+    m_cooldown.markdown(f'<div class="metric-card"><div class="metric-title">Cooldown remaining</div><div class="metric-value">{max(0, int(engine.cooldown_until - time.time()))}s</div></div>', unsafe_allow_html=True)
+    m_inf.markdown(f'<div class="metric-card"><div class="metric-title">Inference frames</div><div class="metric-value">{summary["inference_frames"]}</div></div>', unsafe_allow_html=True)
+    m_red.markdown(f'<div class="metric-card"><div class="metric-title">Computation reduction</div><div class="metric-value">{summary["reduction_pct"]}%</div></div>', unsafe_allow_html=True)
+    
+    with resources_placeholder:
+        render_resource_cards("Resource Snapshot")
+        
+    if summary["last_snapshot_path"]:
+        snapshot_placeholder.image(summary["last_snapshot_path"], use_container_width=True)
+    else:
+        snapshot_placeholder.write("Waiting for the first detected event...")
+else:
+    while st.session_state.monitoring:
+        frame = engine.step()
+        summary = engine.summary()
+        
+        if frame is not None:
+            image_placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), use_container_width=True)
+        else:
+            image_placeholder.warning("No camera frame available. Check your webcam connection.")
+            
+        events = engine.recent_events(limit=8)
+        if events:
+            rows = alert_rows(events, limit=8)
+            events_placeholder.dataframe(pd.DataFrame(rows), use_container_width=True)
+        else:
+            events_placeholder.info("No detection events have been logged yet.")
+
+        m_state.markdown(f'<div class="metric-card"><div class="metric-title">System State</div><div class="metric-value">{summary["state"]}</div></div>', unsafe_allow_html=True)
+        m_cooldown.markdown(f'<div class="metric-card"><div class="metric-title">Cooldown remaining</div><div class="metric-value">{max(0, int(engine.cooldown_until - time.time()))}s</div></div>', unsafe_allow_html=True)
+        m_inf.markdown(f'<div class="metric-card"><div class="metric-title">Inference frames</div><div class="metric-value">{summary["inference_frames"]}</div></div>', unsafe_allow_html=True)
+        m_red.markdown(f'<div class="metric-card"><div class="metric-title">Computation reduction</div><div class="metric-value">{summary["reduction_pct"]}%</div></div>', unsafe_allow_html=True)
+        
+        with resources_placeholder:
+            render_resource_cards("Resource Snapshot")
+            
+        if summary["last_snapshot_path"]:
+            snapshot_placeholder.image(summary["last_snapshot_path"], use_container_width=True)
+        else:
+            snapshot_placeholder.write("Waiting for the first detected event...")
+            
+        time.sleep(0.03)

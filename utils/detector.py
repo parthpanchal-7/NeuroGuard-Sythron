@@ -94,6 +94,7 @@ class NeuroGuardEngine:
         self.audio_alerts_enabled = bool(config.get("audio_alerts_enabled", False))
         self.audio_alert_cooldown = float(config.get("audio_alert_cooldown", 4.0))
         self.last_audio_alert_ts = 0.0
+        self.active_tracks = {}
         ensure_directories()
         self._setup_model()
 
@@ -216,12 +217,17 @@ class NeuroGuardEngine:
                     x1, y1, x2, y2, conf, cls = row.tolist()
                     label = names.get(int(cls), str(int(cls)))
                     threat = self._map_threat(label)
+                    cx = (x1 + x2) / 2.0
+                    cy = (y1 + y2) / 2.0
                     detections.append(
                         {
                             "label": label,
                             "confidence": float(conf),
                             "box": [x1, y1, x2, y2],
                             "threat": threat,
+                            "base_threat": threat,
+                            "centroid": [cx, cy],
+                            "loitering_seconds": 0.0,
                         }
                     )
                 return detections
@@ -234,12 +240,17 @@ class NeuroGuardEngine:
                 x1, y1, x2, y2 = coords.tolist()
                 label = names.get(int(cl), str(int(cl)))
                 threat = self._map_threat(label)
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
                 detections.append(
                     {
                         "label": label,
                         "confidence": float(cval),
                         "box": [x1, y1, x2, y2],
                         "threat": threat,
+                        "base_threat": threat,
+                        "centroid": [cx, cy],
+                        "loitering_seconds": 0.0,
                     }
                 )
         return detections
@@ -262,6 +273,9 @@ class NeuroGuardEngine:
         return snapshot_path
 
     def _create_event(self, detections, snapshot_path, delta_mean, inference_time_ms):
+        max_loitering = 0.0
+        if detections:
+            max_loitering = max(det.get("loitering_seconds", 0.0) for det in detections)
         event = {
             "event_id": str(uuid.uuid4()),
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -270,30 +284,110 @@ class NeuroGuardEngine:
             "snapshot_path": snapshot_path,
             "delta_mean": float(delta_mean),
             "inference_time_ms": float(inference_time_ms),
+            "loitering_seconds": max_loitering,
         }
         self.event_log.insert(0, event)
         return event
 
-    def _fallback_detections(self, delta_frame):
+    def _fallback_detections(self, delta_frame, target_shape=None):
         _, thresh = cv2.threshold(delta_frame, 25, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detections = []
+        
+        scale_x = 1.0
+        scale_y = 1.0
+        if target_shape is not None and len(target_shape) >= 2:
+            H, W = target_shape[:2]
+            h_d, w_d = delta_frame.shape[:2]
+            if w_d > 0 and h_d > 0:
+                scale_x = W / w_d
+                scale_y = H / h_d
+
         for contour in contours:
-            if cv2.contourArea(contour) < self.min_contour_area:
+            area = cv2.contourArea(contour)
+            if area * (scale_x * scale_y) < self.min_contour_area:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
+            x1 = float(x * scale_x)
+            y1 = float(y * scale_y)
+            x2 = float((x + w) * scale_x)
+            y2 = float((y + h) * scale_y)
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
             detections.append(
                 {
                     "label": "motion",
                     "confidence": 0.0,
-                    "box": [x, y, x + w, y + h],
+                    "box": [x1, y1, x2, y2],
                     "threat": "MEDIUM",
+                    "base_threat": "MEDIUM",
+                    "centroid": [cx, cy],
+                    "loitering_seconds": 0.0,
                 }
             )
         return detections
 
+    def _update_loitering_and_escalate(self, detections):
+        now = datetime.utcnow()
+        current_tracks = {}
+        tracked_classes = {"person", "suitcase"}
+        
+        for det in detections:
+            label = det["label"].lower().strip()
+            if label not in tracked_classes:
+                continue
+                
+            cx, cy = det["centroid"]
+            best_match_key = None
+            min_dist = float("inf")
+            
+            for key, track in self.active_tracks.items():
+                if track["label"] != label:
+                    continue
+                pcx, pcy = track["centroid"]
+                dist = ((cx - pcx) ** 2 + (cy - pcy) ** 2) ** 0.5
+                if dist < 150.0 and dist < min_dist:
+                    time_diff = (now - track["last_seen"]).total_seconds()
+                    if time_diff < 60.0:
+                        min_dist = dist
+                        best_match_key = key
+            
+            if best_match_key is not None:
+                prev_track = self.active_tracks[best_match_key]
+                time_diff = (now - prev_track["last_seen"]).total_seconds()
+                loitering_seconds = prev_track["loitering_seconds"] + time_diff
+                track_id = best_match_key
+            else:
+                loitering_seconds = 0.0
+                track_id = str(uuid.uuid4())
+                
+            current_tracks[track_id] = {
+                "label": label,
+                "centroid": [cx, cy],
+                "last_seen": now,
+                "loitering_seconds": loitering_seconds
+            }
+            
+            escalated_threat = det["threat"]
+            if label == "person":
+                if loitering_seconds >= 30.0:
+                    escalated_threat = "HIGH"
+                elif loitering_seconds >= 15.0 and det["base_threat"] == "MEDIUM":
+                    escalated_threat = "HIGH"
+            elif label == "suitcase":
+                if loitering_seconds >= 60.0:
+                    escalated_threat = "HIGH"
+                    
+            det["threat"] = escalated_threat
+            det["loitering_seconds"] = loitering_seconds
+
+        self.active_tracks = {
+            k: v for k, v in self.active_tracks.items()
+            if (now - v["last_seen"]).total_seconds() < 60.0
+        }
+        self.active_tracks.update(current_tracks)
+
     def run_inference(self, frame, delta_frame):
-        self.system_state = "AI_ACTIVE"
         start_time = time.perf_counter()
         detections = []
 
@@ -305,21 +399,29 @@ class NeuroGuardEngine:
                 self.last_error = f"Inference failed: {exc}"
                 detections = []
         else:
-            detections = self._fallback_detections(delta_frame)
+            detections = self._fallback_detections(delta_frame, target_shape=frame.shape)
+
+        # If YOLO was used but found no classified objects, fall back to motion contours
+        if self.model is not None and not detections:
+            detections = self._fallback_detections(delta_frame, target_shape=frame.shape)
+
+        self._update_loitering_and_escalate(detections)
 
         self.inference_frames += 1
         self.last_inference_ms = (time.perf_counter() - start_time) * 1000.0
         self.last_threat = self._highest_threat(detections)
 
-        annotated = self.annotate_frame(frame, detections, state_text="AI_ACTIVE")
+        annotated = self.annotate_frame(frame, detections, state_text=self.system_state)
         snapshot_path = None
-        if detections:
+        
+        now = time.time()
+        if detections and now >= self.cooldown_until:
             snapshot_path = self._save_snapshot(annotated, self.last_threat)
             self._create_event(detections, snapshot_path, self.last_delta, self.last_inference_ms)
             self._play_audio_alert(self.last_threat)
+            self.cooldown_until = now + self.cooldown_duration
+            self.system_state = "COOLDOWN"
 
-        self.cooldown_until = time.time() + self.cooldown_duration
-        self.system_state = "COOLDOWN"
         return annotated
 
     def step(self):
@@ -345,37 +447,41 @@ class NeuroGuardEngine:
             self.power_saving_mode = False
             return self.last_image
 
+        if self.prev_frame.shape != blurred.shape:
+            self.prev_frame = cv2.resize(
+                self.prev_frame, (blurred.shape[1], blurred.shape[0]), interpolation=cv2.INTER_AREA
+            )
+
         delta_frame = cv2.absdiff(self.prev_frame, blurred)
         self.last_delta = float(np.mean(delta_frame))
-
-        if self.active_cooldown:
-            self.prev_frame = blurred
-            self.system_state = "COOLDOWN"
-            self.idle_frames = 0
-            self.power_saving_mode = False
-            self.last_image = self.annotate_frame(frame, state_text="COOLDOWN")
-            return self.last_image
-
-        if self.last_delta >= self.delta_threshold:
-            self.system_state = "MOTION_DETECTED"
-            self.idle_frames = 0
-            self.power_saving_mode = False
-            self.last_image = self.annotate_frame(frame, state_text="MOTION_DETECTED")
-            self.last_image = self.run_inference(frame, delta_frame)
-            self.prev_frame = blurred
-            return self.last_image
-
         self.prev_frame = blurred
 
-        self.idle_frames += 1
-        if self.idle_frames >= self.power_save_after_frames:
-            self.power_saving_mode = True
-            self.system_state = "POWER_SAVING"
+        motion_detected = self.last_delta >= self.delta_threshold
+
+        if motion_detected:
+            self.idle_frames = 0
+            self.power_saving_mode = False
+            if self.active_cooldown:
+                self.system_state = "COOLDOWN"
+            else:
+                self.system_state = "AI_ACTIVE"
+        else:
+            self.idle_frames += 1
+            if self.idle_frames >= self.power_save_after_frames:
+                self.power_saving_mode = True
+                self.system_state = "POWER_SAVING"
+            else:
+                if self.active_cooldown:
+                    self.system_state = "COOLDOWN"
+                else:
+                    self.system_state = "IDLE"
+
+        if self.system_state == "POWER_SAVING":
             preview = self.to_power_saving_preview(frame)
             self.last_image = self.annotate_frame(preview, state_text="POWER_SAVING")
         else:
-            self.system_state = "IDLE"
-            self.last_image = self.annotate_frame(frame, state_text="IDLE")
+            self.last_image = self.run_inference(frame, delta_frame)
+
         return self.last_image
 
     def release_camera(self):

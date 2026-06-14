@@ -8,3 +8,7 @@ __pycache__/
 .vscode/
 
 .DS_Store
+
+snapshots/
+logs/
+exports/
